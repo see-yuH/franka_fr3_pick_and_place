@@ -136,6 +136,14 @@ Processes the overhead camera feed and publishes the `[x, y, z]` coordinates of 
 ```bash
 ros2 run fr3_delivery_sim pick_and_place.py
 ```
+```bash
+
+To increase the movement speed:
+ros2 run fr3_delivery_sim pick_and_place.py --ros-args -p use_sim_time:=true -p vel_scale:=0.3 -p acc_scale:=0.3 -p cart_speed:=0.06
+
+To change the drop location:
+ros2 run fr3_delivery_sim pick_and_place.py --ros-args -p use_sim_time:=true -p drop_x:=0.55 -p drop_y:=0.20
+```
 
 Subscribes to the detected object positions, calls MoveIt 2 to plan trajectories, and commands the FR3 arm to grasp and sort each object.
 
