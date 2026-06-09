@@ -64,6 +64,12 @@ Ensure the following are installed and configured before building:
 
 ---
 
+
+<img width="800" height="446" alt="Image" src="https://github.com/user-attachments/assets/176bd0e8-38c0-40bc-801d-b0140cc6debb" />
+
+<img width="1047" height="241" alt="Image" src="https://github.com/user-attachments/assets/10245363-93ff-439e-9c43-f25d26f0d82d" />
+
+
 ## Installation
 
 ### 1. Create a workspace and clone the repositories
