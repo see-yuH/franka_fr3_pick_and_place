@@ -1,42 +1,23 @@
 #!/usr/bin/env python3
 """
-pick_and_place.py  —  fr3_delivery_sim  (full pick → place-left)
+pick_and_place.py  —  fr3_delivery_sim  (Continuous Multi-color pick → place-left)
 ================================================================
 Builds directly on the working pick.py. Same proven building blocks:
   * HOVER / reposition : MoveIt plan_only -> execute on the JTC
   * vertical moves     : true Cartesian straight line (/compute_cartesian_path)
   * gripper            : Ignition JointPositionController plugins driven over
-                         std_msgs/Float64 topics (NOT ros2_control — that path
-                         is broken by the mimic-joint bug gz_ros2_control #343),
-                         verified via /joint_states.
+                         std_msgs/Float64 topics.
 
 SEQUENCE
 --------
-    1. HOVER above the detected block
-    2. OPEN  the gripper
-    3. DESCEND straight down onto the block
-    4. CLOSE the gripper (grasp)
-    5. LIFT straight up
-    6. TRANSFER to a pose above the drop location on the LEFT (+Y) of the arm
-    7. PLACE  straight down
-    8. OPEN  the gripper (release)
-    9. RETREAT straight up, then return to HOME
+    1. Loops until all 3 blocks (Red, Green, Blue) are picked.
+    2. Prompts the user to choose from the REMAINING blocks.
+    3. Executes the full pick-and-place sequence.
+    4. Offsets the drop location slightly so blocks don't stack/collide.
+    5. Returns home, and prompts again until 0 blocks remain.
 
-"Left of the arm" = +Y in fr3_link0 (REP-103: x forward, y left). The block
-spawns at y in [-0.2, 0.2]; the default drop at y=+0.35 is clearly to the left.
-
-REQUIRES the updated fr3_vision_env.urdf.xacro + sim_launch.py (finger
-JointPositionController plugins + command bridges, gripper ros2_control
-controller NOT spawned), exactly as used by the working pick.py.
-
-RUN (sim up, a cube spawned, vision_detector.py running):
+RUN (sim up, 3 cubes spawned, vision_detector.py running):
     ros2 run fr3_delivery_sim pick_and_place.py --ros-args -p use_sim_time:=true
-
-Handy overrides:
-    -p drop_x:=0.45  -p drop_y:=0.35  -p drop_z:=0.04   # place target (y>0 = left)
-    -p lift_height:=0.20      # travel height above the floor
-    -p grasp_z:=0.04          # TCP height at grasp
-    -p grasp_x_offset:=0.0 -p grasp_y_offset:=0.0
 """
 
 import math
@@ -95,7 +76,6 @@ class PickAndPlace(Node):
         self.declare_parameter('ee_link', 'fr3_hand_tcp')
 
         # Topics
-        self.declare_parameter('pixel_topic', '/detected_block/pixel')
         self.declare_parameter('camera_info_topic', '/camera/camera_info')
 
         # Camera mount (from xacro)
@@ -163,8 +143,9 @@ class PickAndPlace(Node):
         self.cartesian_step = gp('cartesian_step').value
         self.min_fraction = gp('min_cartesian_fraction').value
 
-        # State
-        self._latest_pixel = None
+        # Multi-block state
+        self._pixels = {'R': None, 'G': None, 'B': None}
+        self._latest_pixel = None # Will be set based on user input
         self._cam_info = None
         self._latest_joints = None
 
@@ -172,7 +153,11 @@ class PickAndPlace(Node):
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST, depth=5)
-        self.create_subscription(Point, gp('pixel_topic').value, self._pixel_cb, 10)
+        
+        self.create_subscription(Point, '/detected_block/red', self._pixel_cb_red, 10)
+        self.create_subscription(Point, '/detected_block/green', self._pixel_cb_green, 10)
+        self.create_subscription(Point, '/detected_block/blue', self._pixel_cb_blue, 10)
+        
         self.create_subscription(
             CameraInfo, gp('camera_info_topic').value, self._info_cb, sensor_qos)
         self.create_subscription(JointState, '/joint_states', self._joints_cb, 10)
@@ -198,8 +183,14 @@ class PickAndPlace(Node):
             f"{gp('finger1_topic').value}, {gp('finger2_topic').value}.")
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
-    def _pixel_cb(self, msg: Point):
-        self._latest_pixel = (int(round(msg.x)), int(round(msg.y)))
+    def _pixel_cb_red(self, msg: Point):
+        self._pixels['R'] = (int(round(msg.x)), int(round(msg.y)))
+
+    def _pixel_cb_green(self, msg: Point):
+        self._pixels['G'] = (int(round(msg.x)), int(round(msg.y)))
+
+    def _pixel_cb_blue(self, msg: Point):
+        self._pixels['B'] = (int(round(msg.x)), int(round(msg.y)))
 
     def _info_cb(self, msg: CameraInfo):
         self._cam_info = msg
@@ -214,7 +205,6 @@ class PickAndPlace(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
             if predicate():
                 return True
-        self.get_logger().error(f"Timed out waiting for {what}.")
         return False
 
     def _settle(self, seconds=1.0):
@@ -240,8 +230,7 @@ class PickAndPlace(Node):
         cmd.data = float(target)
         self._finger1_pub.publish(cmd)
         self._finger2_pub.publish(cmd)
-        self.get_logger().info(
-            f'[gripper] {label}: commanding both fingers -> {target:.4f} m')
+        self.get_logger().info(f'[gripper] {label}: commanding both fingers -> {target:.4f} m')
 
         start = time.time()
         next_pub = start + 0.3
@@ -294,7 +283,7 @@ class PickAndPlace(Node):
 
     def localize_block(self):
         if self._latest_pixel is None:
-            self.get_logger().error('No block pixel received.')
+            self.get_logger().error('No block pixel selected.')
             return None
         u, v = self._latest_pixel
         fx, fy, cx, cy = self._intrinsics()
@@ -304,9 +293,6 @@ class PickAndPlace(Node):
         off_v = (v - cy) / fy * height
         x = self.cam[0] - off_v + self.grasp_x_offset
         y = self.cam[1] - off_u + self.grasp_y_offset
-        self.get_logger().info(
-            f'[geometric] pixel=({u},{v}) -> block=({x:.3f}, {y:.3f}, {target_z:.3f}) '
-            f'[offsets x={self.grasp_x_offset:+.3f} y={self.grasp_y_offset:+.3f}]')
         return (x, y, target_z)
 
     # ── Orientation helper ───────────────────────────────────────────────────────
@@ -378,31 +364,23 @@ class PickAndPlace(Node):
         rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
         gh = fut.result()
         if gh is None or not gh.accepted:
-            self.get_logger().error('Plan request rejected/timed out.')
             return None
         rfut = gh.get_result_async()
         rclpy.spin_until_future_complete(self, rfut, timeout_sec=self.planning_time + 5.0)
         if not rfut.done():
-            self.get_logger().error('Plan result timed out.')
             return None
         res = rfut.result().result
         if res.error_code.val != MOVEIT_SUCCESS:
-            self.get_logger().error(f'Plan failed (code {res.error_code.val}).')
             return None
-        traj = res.planned_trajectory.joint_trajectory
-        self.get_logger().info(f'Plan OK ({len(traj.points)} waypoints).')
-        return traj
+        return res.planned_trajectory.joint_trajectory
 
     def move_to_pose(self, xyz, label='pose', tries=3):
         goal_c = self._pose_constraints(xyz, self._down_quat())
         for attempt in range(1, tries + 1):
-            self.get_logger().info(
-                f'--> {label} {tuple(round(c, 3) for c in xyz)} '
-                f'(attempt {attempt}/{tries})')
+            self.get_logger().info(f'--> {label} {tuple(round(c, 3) for c in xyz)}')
             traj = self._plan_goal(goal_c)
             if traj is not None:
                 return self._execute(traj)
-            self.get_logger().warn(f'{label} attempt {attempt} failed; retrying...')
             self._settle(0.5)
         self.get_logger().error(f'All {label} attempts failed.')
         return False
@@ -421,7 +399,6 @@ class PickAndPlace(Node):
             if traj is not None:
                 self.get_logger().info(f'--> {label} (cartesian straight line)')
                 return self._execute(traj)
-            self.get_logger().warn(f'{label}: cartesian insufficient — joint fallback.')
         self.get_logger().info(f'--> {label} (joint-space fallback)')
         return self.move_to_pose(xyz, label)
 
@@ -449,11 +426,7 @@ class PickAndPlace(Node):
         fut = self._cart_client.call_async(req)
         rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
         resp = fut.result()
-        if resp is None:
-            self.get_logger().error('compute_cartesian_path: no response.')
-            return None
-        self.get_logger().info(f'Cartesian fraction = {resp.fraction:.2f}')
-        if resp.fraction < self.min_fraction:
+        if resp is None or resp.fraction < self.min_fraction:
             return None
         traj = resp.solution.joint_trajectory
         if not traj.points:
@@ -469,8 +442,6 @@ class PickAndPlace(Node):
             pt.velocities = []
             pt.accelerations = []
             pt.effort = []
-        self.get_logger().info(
-            f'Re-timed cartesian path: {n} pts over {total:.1f}s (~{self.cart_speed:.3f} m/s).')
         return traj
 
     # ── Execute a trajectory on the JTC ──────────────────────────────────────────
@@ -485,77 +456,110 @@ class PickAndPlace(Node):
         rclpy.spin_until_future_complete(self, fut)
         gh = fut.result()
         if gh is None or not gh.accepted:
-            self.get_logger().error('Execution rejected by JTC.')
             return False
         rfut = gh.get_result_async()
         rclpy.spin_until_future_complete(self, rfut)
-        code = rfut.result().result.error_code
-        if code == FollowJointTrajectory.Result.SUCCESSFUL:
-            self.get_logger().info('Execution complete \u2713')
-            return True
-        self.get_logger().error(f'Execution failed (code {code}).')
-        return False
+        return rfut.result().result.error_code == FollowJointTrajectory.Result.SUCCESSFUL
 
     # ── Orchestration ────────────────────────────────────────────────────────────
     def run(self):
         self.get_logger().info('Waiting for camera_info, joint_states, detection...')
         self._wait_for(lambda: self._cam_info is not None, 10.0, 'camera_info')
         self._wait_for(lambda: self._latest_joints is not None, 5.0, 'joint_states')
-        if not self._wait_for(lambda: self._latest_pixel is not None,
-                              self.detection_timeout, 'block detection'):
-            return
+        
+        picked_colors = set()
+        colors = ['R', 'G', 'B']
 
-        if self._latest_joints is not None and FINGER_JOINT not in self._latest_joints.name:
-            self.get_logger().error(
-                f'{FINGER_JOINT} not in /joint_states — gripper cannot be verified.')
+        # Loop until all 3 colors have been successfully picked and placed
+        while rclpy.ok() and len(picked_colors) < len(colors):
+            
+            # Helper to check if there are any blocks left that we haven't picked yet
+            def has_unpicked_blocks():
+                for c in colors:
+                    if c not in picked_colors and self._pixels[c] is not None:
+                        return True
+                return False
 
-        block = self.localize_block()
-        if block is None:
-            return
-        bx, by, _ = block
+            if not self._wait_for(has_unpicked_blocks, self.detection_timeout, 'any unpicked block detection'):
+                self.get_logger().error("No unpicked blocks detected. Stopping.")
+                break
 
-        travel_z = self.table_z + self.cube_half + self.lift_height   # transfer height
-        hover    = (bx, by, self.table_z + self.cube_half + self.approach_height)
-        grasp    = (bx, by, self.grasp_z)
-        lift     = (bx, by, travel_z)
-        drop_above = (self.drop[0], self.drop[1], travel_z)
-        drop     = self.drop
+            self._settle(1.0) # Let the camera topics stabilize
 
-        self.get_logger().info(
-            f'\n  Block:  x={bx:.3f}  y={by:.3f}\n'
-            f'  hover z={hover[2]:.3f}  grasp z={grasp[2]:.3f}  travel z={travel_z:.3f}\n'
-            f'  drop -> x={drop[0]:.3f}  y={drop[1]:.3f} (+y = LEFT)  z={drop[2]:.3f}\n'
-            f'  gripper open->{self.grip_open:.3f}  close->{self.grip_close:.3f}')
+            # Render the dynamic menu
+            print("\n" + "="*40)
+            print("    AVAILABLE BLOCKS DETECTED")
+            available = []
+            for color in colors:
+                if color not in picked_colors and self._pixels[color]:
+                    print(f"    [{color}] -> {self._pixels[color]}")
+                    available.append(color)
+            print("="*40)
 
-        steps = [
-            ('1. Hover above block',  lambda: self.move_to_pose(hover, 'hover')),
-            ('   settle',             lambda: self._settle(0.8)),
-            ('2. Open gripper',       self.open_gripper),
-            ('   settle',             lambda: self._settle(0.6)),
-            ('3. Descend to grasp',   lambda: self.cartesian_move(grasp, hover[2] - grasp[2], 'descend')),
-            ('   settle',             lambda: self._settle(0.5)),
-            ('4. Close gripper',      self.close_gripper),
-            ('   settle',             lambda: self._settle(0.6)),
-            ('5. Lift block',         lambda: self.cartesian_move(lift, travel_z - grasp[2], 'lift')),
-            ('   settle',             lambda: self._settle(0.5)),
-            ('6. Transfer left',      lambda: self.move_to_pose(drop_above, 'above-drop')),
-            ('   settle',             lambda: self._settle(0.6)),
-            ('7. Place down',         lambda: self.cartesian_move(drop, travel_z - drop[2], 'place')),
-            ('   settle',             lambda: self._settle(0.5)),
-            ('8. Open gripper',       self.open_gripper),
-            ('   settle',             lambda: self._settle(0.6)),
-            ('9. Retreat up',         lambda: self.cartesian_move(drop_above, travel_z - drop[2], 'retreat')),
-        ]
-        if self.return_home:
-            steps.append(('10. Return home', lambda: self.move_to_joints(HOME, 'home')))
+            # Prompt the user
+            choice = input(f"\nEnter choice ({', '.join(available)}) to pick a block: ").strip().upper()
+            
+            if choice not in available:
+                self.get_logger().error(f"Invalid choice '{choice}'. Please select from {available}.")
+                continue # Loop back to the prompt
+                
+            self.get_logger().info(f"Target locked on {choice} block.")
+            self._latest_pixel = self._pixels[choice]
 
-        for name, action in steps:
-            self.get_logger().info(f'=== STEP: {name} ===')
-            if not action():
-                self.get_logger().error(f'Step "{name}" failed — aborting.')
-                return
-        self.get_logger().info('Pick-and-place complete \u2713')
+            if self._latest_joints is not None and FINGER_JOINT not in self._latest_joints.name:
+                self.get_logger().error('Gripper cannot be verified (missing in /joint_states).')
 
+            block = self.localize_block()
+            if block is None:
+                continue
+            
+            bx, by, _ = block
+            travel_z = self.table_z + self.cube_half + self.lift_height
+            hover    = (bx, by, self.table_z + self.cube_half + self.approach_height)
+            grasp    = (bx, by, self.grasp_z)
+            lift     = (bx, by, travel_z)
+            
+            # Add an offset to the drop position so the blocks line up nicely
+            # Each block moves 6cm further along the Y axis
+            drop_offset_y = len(picked_colors) * 0.06
+            drop = (self.drop[0], self.drop[1] + drop_offset_y, self.drop[2])
+            drop_above = (drop[0], drop[1], travel_z)
+
+            steps = [
+                ('1. Hover above block',  lambda: self.move_to_pose(hover, 'hover')),
+                ('   settle',             lambda: self._settle(0.8)),
+                ('2. Open gripper',       self.open_gripper),
+                ('   settle',             lambda: self._settle(0.6)),
+                ('3. Descend to grasp',   lambda: self.cartesian_move(grasp, hover[2] - grasp[2], 'descend')),
+                ('   settle',             lambda: self._settle(0.5)),
+                ('4. Close gripper',      self.close_gripper),
+                ('   settle',             lambda: self._settle(0.6)),
+                ('5. Lift block',         lambda: self.cartesian_move(lift, travel_z - grasp[2], 'lift')),
+                ('   settle',             lambda: self._settle(0.5)),
+                ('6. Transfer left',      lambda: self.move_to_pose(drop_above, 'above-drop')),
+                ('   settle',             lambda: self._settle(0.6)),
+                ('7. Place down',         lambda: self.cartesian_move(drop, travel_z - drop[2], 'place')),
+                ('   settle',             lambda: self._settle(0.5)),
+                ('8. Open gripper',       self.open_gripper),
+                ('   settle',             lambda: self._settle(0.6)),
+                ('9. Retreat up',         lambda: self.cartesian_move(drop_above, travel_z - drop[2], 'retreat')),
+                ('10. Return home',       lambda: self.move_to_joints(HOME, 'home'))
+            ]
+
+            success = True
+            for name, action in steps:
+                self.get_logger().info(f'=== STEP: {name} ===')
+                if not action():
+                    self.get_logger().error(f'Step "{name}" failed — aborting this block.')
+                    success = False
+                    break
+            
+            if success:
+                picked_colors.add(choice)
+                self.get_logger().info(f'Block {choice} complete! ({len(picked_colors)}/3 done)')
+
+        if len(picked_colors) == 3:
+            self.get_logger().info('All blocks cleared! Shutting down.')
 
 def main(args=None):
     rclpy.init(args=args)
@@ -567,7 +571,6 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

@@ -1,28 +1,22 @@
 #!/usr/bin/env python3
 """
-Phase 2/3 — Random block spawner for fr3_delivery_sim.
-
-Spawns a single red cube at a random (x, y) position on the floor
-within the camera's FOV and the robot's reachable workspace.
+Phase 2/3 — Multi-block spawner for fr3_delivery_sim.
+Spawns a red, green, and blue cube at random, non-overlapping positions.
 """
 
 import random
+import math
 import rclpy
 from rclpy.node import Node
 from ros_gz_interfaces.srv import SpawnEntity
 from ros_gz_interfaces.msg import EntityFactory
 from geometry_msgs.msg import Pose
 
-# ── Workspace bounds ──────────────────────────────────────────────────────────
-# Pulled 5 cm inside the arm's reachable workspace on every side so that
-# small depth-image measurement errors near the image edges never push the
-# reconstructed block position beyond the arm's comfortable reach.
-X_MIN, X_MAX =  0.35,  0.60   # metres forward from robot base
-Y_MIN, Y_MAX = -0.20,  0.20   # metres lateral
-CUBE_HALF_HEIGHT = 0.025      # cube is 0.05 m, so z = 0.025 sits on the floor
+X_MIN, X_MAX =  0.35,  0.60
+Y_MIN, Y_MAX = -0.20,  0.20
+CUBE_HALF_HEIGHT = 0.025
 
-# ── SDF template for the red cube ─────────────────────────────────────────────
-def make_cube_sdf(name: str) -> str:
+def make_cube_sdf(name: str, r: float, g: float, b: float) -> str:
     return f"""<?xml version="1.0"?>
 <sdf version="1.6">
   <model name="{name}">
@@ -36,17 +30,13 @@ def make_cube_sdf(name: str) -> str:
         </inertia>
       </inertial>
       <collision name="collision">
-        <geometry>
-          <box><size>0.05 0.05 0.05</size></box>
-        </geometry>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
       </collision>
       <visual name="visual">
-        <geometry>
-          <box><size>0.05 0.05 0.05</size></box>
-        </geometry>
+        <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
         <material>
-          <ambient>1 0 0 1</ambient>
-          <diffuse>0.9 0.1 0.1 1</diffuse>
+          <ambient>{r} {g} {b} 1</ambient>
+          <diffuse>{r*0.9} {g*0.9} {b*0.9} 1</diffuse>
           <specular>0.2 0.2 0.2 1</specular>
         </material>
       </visual>
@@ -65,43 +55,48 @@ class ObjectSpawner(Node):
         while not self.client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info(f'  {self.SPAWN_SERVICE} not ready yet, retrying...')
 
-        self.get_logger().info('Spawn service found — spawning red cube.')
-        self._spawn_cube()
+        self.get_logger().info('Spawn service found — spawning cubes.')
+        self._spawn_cubes()
 
-    def _spawn_cube(self):
-        x = random.uniform(X_MIN, X_MAX)
-        y = random.uniform(Y_MIN, Y_MAX)
-        z = CUBE_HALF_HEIGHT
+    def _spawn_cubes(self):
+        cubes = [
+            ('red_cube',   1.0, 0.0, 0.0),
+            ('green_cube', 0.0, 1.0, 0.0),
+            ('blue_cube',  0.0, 0.0, 1.0)
+        ]
+        spawned_positions = []
 
-        self.get_logger().info(f'Target position: x={x:.3f}  y={y:.3f}  z={z}')
+        for name, r, g, b in cubes:
+            # Distance check to ensure blocks don't spawn inside each other
+            while True:
+                x = random.uniform(X_MIN, X_MAX)
+                y = random.uniform(Y_MIN, Y_MAX)
+                if all(math.hypot(x - px, y - py) > 0.08 for px, py in spawned_positions):
+                    spawned_positions.append((x, y))
+                    break
 
-        pose = Pose()
-        pose.position.x = x
-        pose.position.y = y
-        pose.position.z = z
-        pose.orientation.w = 1.0
+            z = CUBE_HALF_HEIGHT
+            pose = Pose()
+            pose.position.x = x
+            pose.position.y = y
+            pose.position.z = z
+            pose.orientation.w = 1.0
 
-        request = SpawnEntity.Request()
-        
-        # Modern Gazebo Fortress EntityFactory structure
-        factory = EntityFactory()
-        factory.name = 'red_cube'
-        factory.sdf = make_cube_sdf('red_cube')
-        factory.pose = pose
-        factory.allow_renaming = True
-        
-        request.entity_factory = factory
+            request = SpawnEntity.Request()
+            factory = EntityFactory()
+            factory.name = name
+            factory.sdf = make_cube_sdf(name, r, g, b)
+            factory.pose = pose
+            factory.allow_renaming = True
+            request.entity_factory = factory
 
-        future = self.client.call_async(request)
-        rclpy.spin_until_future_complete(self, future)
+            future = self.client.call_async(request)
+            rclpy.spin_until_future_complete(self, future)
 
-        result = future.result()
-        if result is None:
-            self.get_logger().error('Service call returned no result (timeout?).')
-        elif result.success:
-            self.get_logger().info(f'Red cube spawned at ({x:.3f}, {y:.3f}, {z}) ✓')
-        else:
-            self.get_logger().error(f'Spawn failed: {result.status_message}')
+            if future.result() and future.result().success:
+                self.get_logger().info(f'{name} spawned at ({x:.3f}, {y:.3f}, {z})')
+            else:
+                self.get_logger().error(f'Spawn failed for {name}')
 
 def main(args=None):
     rclpy.init(args=args)
