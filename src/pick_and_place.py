@@ -520,8 +520,8 @@ class PickAndPlace(Node):
             lift     = (bx, by, travel_z)
             
             # Add an offset to the drop position so the blocks line up nicely
-            # Each block moves 6cm further along the Y axis
-            drop_offset_y = len(picked_colors) * 0.06
+            # Each block moves 10cm further along the Y axis
+            drop_offset_y = len(picked_colors) * 0.10
             drop = (self.drop[0], self.drop[1] + drop_offset_y, self.drop[2])
             drop_above = (drop[0], drop[1], travel_z)
 
