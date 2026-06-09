@@ -1,0 +1,190 @@
+# FR3 Pick-and-Place Simulation
+
+[![ROS 2 Humble](https://img.shields.io/badge/ROS_2-Humble-blue)](https://docs.ros.org/en/humble/)
+[![Ubuntu 22.04](https://img.shields.io/badge/Ubuntu-22.04-orange)](https://releases.ubuntu.com/22.04/)
+[![License](https://img.shields.io/badge/License-Apache--2.0-green)](LICENSE)
+
+A ROS 2 package (`fr3_delivery_sim`) that simulates a **Franka Research 3 (FR3)** robotic arm performing autonomous pick-and-place and block-sorting tasks in Gazebo. The pipeline integrates MoveIt 2 for collision-aware motion planning, an overhead camera for object detection, and `ros2_control` with fake hardware for full simulation fidelity — no physical robot required.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Repository Structure](#repository-structure)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Running the Simulation](#running-the-simulation)
+- [System Architecture](#system-architecture)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Overview
+
+This project demonstrates a complete end-to-end robotic manipulation pipeline in simulation:
+
+1. Objects are spawned dynamically in a Gazebo world.
+2. An overhead vision node detects their 3D coordinates and publishes them.
+3. MoveIt 2 plans a collision-free trajectory to the object.
+4. The FR3 arm executes the grasp, transports the object, and releases it at the target zone.
+
+All motion is executed using MoveIt 2's `MoveGroupInterface` over the `joint_trajectory_controller`, with the robot hardware handled by `ros2_control` in fake mode.
+
+---
+
+## Repository Structure
+
+```
+franka_fr3_pick_and_place/
+├── config/           # MoveIt 2, ros2_control, and controller configuration files
+├── launch/           # Launch files for bring-up
+├── src/              # Python nodes (vision detector, pick-and-place executor)
+├── urdf/             # Robot description and Gazebo world files
+├── CMakeLists.txt
+└── package.xml
+```
+
+---
+
+## Prerequisites
+
+Ensure the following are installed and configured before building:
+
+| Requirement | Version / Notes |
+|---|---|
+| Operating System | Ubuntu 22.04 |
+| ROS 2 | Humble Hawksbill |
+| Gazebo | Classic (Gazebo 11) or Ignition Fortress |
+| MoveIt 2 | Humble release |
+| ros2_control | Humble release |
+| Git, Colcon | Latest available |
+
+> This package also depends on the official [franka_ros2](https://github.com/frankarobotics/franka_ros2) repository for the FR3 URDF description, mesh files, and MoveIt configuration. The installation steps below handle this.
+
+---
+
+## Installation
+
+### 1. Create a workspace and clone the repositories
+
+```bash
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
+
+# This simulation package
+git clone https://github.com/see-yuH/franka_fr3_pick_and_place.git
+
+# Official Franka ROS 2 package — provides FR3 description, meshes, and MoveIt config
+git clone https://github.com/frankarobotics/franka_ros2.git
+```
+
+### 2. Install dependencies
+
+```bash
+cd ~/ros2_ws
+rosdep install --from-paths src --ignore-src -r -y
+```
+
+### 3. Build the workspace
+
+```bash
+colcon build --symlink-install
+```
+
+### 4. Source the workspace
+
+```bash
+source install/setup.bash
+```
+
+> **Tip:** Add this line to your `~/.bashrc` so you don't need to source manually in each new terminal:
+> ```bash
+> echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
+> ```
+
+---
+
+## Running the Simulation
+
+The simulation requires three separate terminals. Source the workspace in each one before running.
+
+### Terminal 1 — Launch Gazebo and spawn objects
+
+```bash
+ros2 launch fr3_delivery_sim sim.launch.py
+```
+
+This brings up the Gazebo world, spawns the FR3 robot with `ros2_control`, and dynamically places objects in the scene.
+
+### Terminal 2 — Start the vision detector
+
+```bash
+ros2 run fr3_delivery_sim vision_detector.py
+```
+
+Processes the overhead camera feed and publishes the `[x, y, z]` coordinates of detected objects as ROS topics.
+
+### Terminal 3 — Execute pick-and-place
+
+```bash
+ros2 run fr3_delivery_sim pick_and_place.py
+```
+
+Subscribes to the detected object positions, calls MoveIt 2 to plan trajectories, and commands the FR3 arm to grasp and sort each object.
+
+---
+
+## System Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Gazebo Simulation                   │
+│   FR3 Robot (ros2_control / fake hardware)              │
+│   Overhead Camera  │  Spawned Objects                   │
+└────────┬───────────┴──────────────────┬─────────────────┘
+         │ /image_raw                   │ object poses
+         ▼                              ▼
+  [vision_detector.py]         publishes /detected_object
+         │
+         └──────────────────────────────┐
+                                        ▼
+                           [pick_and_place.py]
+                                        │
+                           MoveIt 2 MoveGroupInterface
+                                        │
+                           joint_trajectory_controller
+                                        │
+                              FR3 executes motion
+```
+
+**Node summary:**
+
+- **`vision_detector.py`** — Subscribes to the simulated camera, segments objects by colour/depth, and publishes target coordinates.
+- **`pick_and_place.py`** — Reads target coordinates, calls MoveIt 2 to plan to a pre-grasp pose, closes the gripper, lifts, transports, and drops the object at the delivery zone.
+
+---
+
+## Troubleshooting
+
+**Gazebo loads but the robot model is missing**
+Verify that `franka_ros2` was cloned and built successfully — it provides the `.dae` and `.stl` mesh files required by the FR3 URDF. Re-run `colcon build` after cloning it.
+
+**Controllers fail to load on startup**
+Check that the controller names in `config/` match those defined in your `ros2_control` YAML. Run `ros2 control list_controllers` to inspect the active state.
+
+**MoveIt 2 reports no valid plan**
+The spawned object may be outside the FR3's reachable workspace. Check the object spawn coordinates in the launch file and confirm they fall within the arm's kinematic reach.
+
+**Gazebo physics is unstable or running slowly**
+Hardware-accelerated rendering is recommended. Ensure your GPU drivers are active and that `GAZEBO_MODEL_PATH` is set correctly if custom meshes are not loading.
+
+**`vision_detector.py` exits immediately or publishes no detections**
+Confirm the camera topic name matches what is published by the Gazebo camera plugin. Use `ros2 topic list` after launching the simulation to verify.
+
+---
+
+## Author
+
+**Adithya Raj**
+[github.com/see-yuH](https://github.com/see-yuH)
