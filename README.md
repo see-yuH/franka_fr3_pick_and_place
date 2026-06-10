@@ -60,45 +60,47 @@ Ensure the following are installed and configured before building:
 | ros2_control | Humble release |
 | Git, Colcon | Latest available |
 
-> This package also depends on the official [franka_ros2](https://github.com/frankarobotics/franka_ros2) repository for the FR3 URDF description, mesh files, and MoveIt configuration. The installation steps below handle this.
+> This package is built on top of the official [franka_ros2](https://github.com/frankarobotics/franka_ros2) workspace. **Complete that setup first** before proceeding with the installation steps below.
 
 ---
-
 
 <img width="800" height="446" alt="Image" src="https://github.com/user-attachments/assets/176bd0e8-38c0-40bc-801d-b0140cc6debb" />
 
 <img width="1047" height="241" alt="Image" src="https://github.com/user-attachments/assets/10245363-93ff-439e-9c43-f25d26f0d82d" />
 
+---
 
 ## Installation
 
-### 1. Create a workspace and clone the repositories
+### 1. Set up the Franka ROS 2 workspace
+
+Follow the official `franka_ros2` setup guide completely before proceeding:
+
+> https://github.com/frankarobotics/franka_ros2
+
+This sets up the base workspace at `~/ros2_ws` with all Franka dependencies, URDF descriptions, mesh files, and MoveIt configuration already built.
+
+### 2. Clone this package into the existing workspace
 
 ```bash
-mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
-
-# This simulation package
 git clone https://github.com/see-yuH/franka_fr3_pick_and_place.git
-
-# Official Franka ROS 2 package — provides FR3 description, meshes, and MoveIt config
-git clone https://github.com/frankarobotics/franka_ros2.git
 ```
 
-### 2. Install dependencies
+### 3. Install any additional dependencies
 
 ```bash
 cd ~/ros2_ws
 rosdep install --from-paths src --ignore-src -r -y
 ```
 
-### 3. Build the workspace
+### 4. Rebuild the workspace
 
 ```bash
 colcon build --symlink-install
 ```
 
-### 4. Source the workspace
+### 5. Source the workspace
 
 ```bash
 source install/setup.bash
@@ -133,15 +135,18 @@ Processes the overhead camera feed and publishes the `[x, y, z]` coordinates of 
 
 ### Terminal 3 — Execute pick-and-place
 
+Default run:
 ```bash
 ros2 run fr3_delivery_sim pick_and_place.py
 ```
-```bash
 
-To increase the movement speed:
+To increase movement speed:
+```bash
 ros2 run fr3_delivery_sim pick_and_place.py --ros-args -p use_sim_time:=true -p vel_scale:=0.3 -p acc_scale:=0.3 -p cart_speed:=0.06
+```
 
 To change the drop location:
+```bash
 ros2 run fr3_delivery_sim pick_and_place.py --ros-args -p use_sim_time:=true -p drop_x:=0.55 -p drop_y:=0.20
 ```
 
@@ -182,7 +187,7 @@ Subscribes to the detected object positions, calls MoveIt 2 to plan trajectories
 ## Troubleshooting
 
 **Gazebo loads but the robot model is missing**
-Verify that `franka_ros2` was cloned and built successfully — it provides the `.dae` and `.stl` mesh files required by the FR3 URDF. Re-run `colcon build` after cloning it.
+Verify that the `franka_ros2` workspace was set up and built successfully — it provides the `.dae` and `.stl` mesh files required by the FR3 URDF. Re-run `colcon build` if needed.
 
 **Controllers fail to load on startup**
 Check that the controller names in `config/` match those defined in your `ros2_control` YAML. Run `ros2 control list_controllers` to inspect the active state.
