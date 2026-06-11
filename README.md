@@ -207,5 +207,6 @@ Confirm the camera topic name matches what is published by the Gazebo camera plu
 
 **Adithya Raj**
 [github.com/see-yuH](https://github.com/see-yuH)
+
 **Sanjeet Sathiyamoorthy**
 [github.com/sanjeetsathiyamoorthy](https://github.com/sanjeetsathiyamoorthy)
